@@ -9,7 +9,7 @@ alias sp-gen-types='source .env && supabase gen types --lang=typescript --projec
 alias sp-db-mnew='supabase migration new $1'
 alias sp-db-mup='supabase migration up --linked'
 alias sp-db-reset='supabase db reset --linked'
-alias sp-db-seed='node --env-file=.env database/sedding.js'
+alias sp-db-seed='node --env-file=.env database/seed.js'
 alias sp-db-rs='sp-db-reset && node --env-file=.env database/sedding.js'
 alias node-env-debug='source .env && node -e "console.log(true)"'
 alias debug-alias='/usr/bin/echo "test"'
