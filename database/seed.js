@@ -228,6 +228,102 @@ const seedInternationalAssignments = async (count, assignmentIds, contractorIds)
 
   await insertInBatches("internationalassignment", rows);
   logStep(`internationalassignment seeded (${rows.length.toLocaleString()} rows).`);
+
+  // Return used IDs so seedQueryScenario can pick from the remaining pool
+  return new Set(selectedIds);
+};
+
+/**
+ * Guarantees the data conditions needed to make the slow query measurably slow:
+ *   - User 6631 is active and has ≥ 10 UserProjectAccess rows
+ *   - The target projects are active
+ *   - Every contractor linked to those projects has at least one InternationalAssignment
+ *     (so the LEFT JOIN LATERAL does real work for each outer row, not just empty scans)
+ */
+const seedQueryScenario = async (projectNumbers, assignmentIds, usedIaIds) => {
+  logStep("Setting up slow-query scenario for userId=6631...");
+
+  const SCENARIO_USER_ID = 6631;
+  const scenarioProjects = projectNumbers.slice(0, 10);
+
+  // Step 1 — ensure user 6631 is active
+  const { error: userErr } = await supabase
+    .from("demouser")
+    .update({ isactive: true })
+    .eq("id", SCENARIO_USER_ID);
+  if (userErr) logErrorAndExit("demouser update (scenario)", userErr);
+
+  // Step 2 — ensure the 10 scenario projects are active
+  const { error: projectErr } = await supabase
+    .from("project")
+    .update({ isactive: true })
+    .in("number", scenarioProjects);
+  if (projectErr) logErrorAndExit("project update (scenario)", projectErr);
+
+  // Step 3 — give user 6631 one UserProjectAccess row per scenario project
+  const accessRows = scenarioProjects.map((projectnumber) => ({
+    userid: SCENARIO_USER_ID,
+    projectnumber,
+    isactive: true,
+  }));
+  const { error: accessErr } = await supabase
+    .from("userprojectaccess")
+    .insert(accessRows);
+  if (accessErr) logErrorAndExit("userprojectaccess (scenario)", accessErr);
+  logStep(`  inserted ${accessRows.length} userprojectaccess rows for userId=${SCENARIO_USER_ID}.`);
+
+  // Step 4 — find all contractors linked to the scenario projects
+  const { data: pcRows, error: pcErr } = await supabase
+    .from("projectcontractor")
+    .select("contractorid")
+    .in("projectnumber", scenarioProjects)
+    .eq("isactive", true);
+  if (pcErr) logErrorAndExit("projectcontractor lookup (scenario)", pcErr);
+
+  const scenarioContractorIds = [...new Set(pcRows.map((r) => r.contractorid))];
+  logStep(`  found ${scenarioContractorIds.length} contractors linked to scenario projects.`);
+
+  // Step 5 — ensure those contractors are active
+  const { error: ctErr } = await supabase
+    .from("contractor")
+    .update({ isactive: true })
+    .in("id", scenarioContractorIds);
+  if (ctErr) logErrorAndExit("contractor update (scenario)", ctErr);
+
+  // Step 6 — find which of those contractors already have an InternationalAssignment
+  const { data: existingIa, error: iaLookupErr } = await supabase
+    .from("internationalassignment")
+    .select("contractorid")
+    .in("contractorid", scenarioContractorIds);
+  if (iaLookupErr) logErrorAndExit("internationalassignment lookup (scenario)", iaLookupErr);
+
+  const contractorsWithIa = new Set(existingIa.map((r) => r.contractorid));
+  const contractorsMissingIa = scenarioContractorIds.filter(
+    (id) => !contractorsWithIa.has(id),
+  );
+  logStep(`  ${contractorsMissingIa.length} contractors need a new InternationalAssignment.`);
+
+  if (contractorsMissingIa.length === 0) {
+    logStep("Slow-query scenario ready.");
+    return;
+  }
+
+  // Step 7 — insert one InternationalAssignment per contractor that was missing one,
+  //           using assignment IDs that were not consumed by the main seed.
+  const availableIds = assignmentIds.filter((id) => !usedIaIds.has(id));
+  const iaRows = contractorsMissingIa.map((contractorid, i) => ({
+    id: availableIds[i],
+    contractorid,
+  }));
+  const { error: iaInsertErr } = await supabase
+    .from("internationalassignment")
+    .insert(iaRows);
+  if (iaInsertErr) logErrorAndExit("internationalassignment (scenario)", iaInsertErr);
+
+  logStep(
+    `  inserted ${iaRows.length} InternationalAssignment rows for scenario contractors.`,
+  );
+  logStep("Slow-query scenario ready.");
 };
 
 // ─── Orchestration ────────────────────────────────────────────────────────────
@@ -250,7 +346,9 @@ const seedDatabase = async () => {
   ]);
 
   const assignmentIds = await seedAssignments(1_700_661);
-  await seedInternationalAssignments(31_465, assignmentIds, contractorIds);
+  const usedIaIds = await seedInternationalAssignments(31_465, assignmentIds, contractorIds);
+
+  await seedQueryScenario(projectNumbers, assignmentIds, usedIaIds);
 
   logStep("Database seeded successfully!");
 };
